@@ -8,11 +8,13 @@
 
 Dicho buffer se encuentra en la dirección física de memoria `0xF151C000` y solo debe ser modificable por el lector de cartuchos.
 
- Para solicitar acceso al buffer, las tareas deberán informar que desean acceder a él mediante una syscall `opendevice` habiendo configurado el tipo de acceso al buffer en la dirección virtual `0xACCE50` (mapeada como r/w para la tarea). Allí almacenará una variable  `uint8_t acceso` con posibles valores `0`, `1` y `2`. El valor `0` indica que la tarea no accederá al buffer de video, `1` que accederá mediante DMA y `2` que accederá por copia. De acceder por copia, la dirección virtual donde realizar la copia estará dada por el valor del registro `ECX` al momento de llamar a `opendevice`.
+ Para solicitar acceso al buffer, las tareas deberán informar que desean acceder a él mediante una syscall `opendevice` habiendo configurado el tipo de acceso al buffer en la dirección virtual `0xACCE5000` (mapeada como r/w para la tarea). Allí almacenará una variable  `uint8_t acceso` con posibles valores `0`, `1` y `2`. El valor `0` indica que la tarea no accederá al buffer de video, `1` que accederá mediante DMA y `2` que accederá por copia. De acceder por copia, la dirección virtual donde realizar la copia estará dada por el valor del registro `ECX` al momento de llamar a `opendevice`, y sus permisos van a ser de r/w. Asumimos que las tareas tienen esa dirección virtual mapeada a alguna dirección física.
 
  El sistema no debe retomar la ejecución de estas tareas hasta que se detecte que el buffer está listo y se haya realizado el mapeo DMA o la copia correspondiente. Una vez que la tarea termine de utilizar el buffer, deberá indicarlo mediante la syscall `closedevice`. En ésta se debe retirar el acceso al buffer por DMA o dejar de actualizar la copia, según corresponda.
 
  La interrupción de buffer completo será la encargada de dar el acceso correspondiente a las tareas que lo hayan solicitado y actualizar las copia del buffer "vivas". Es deseable que cada tarea que accede por copia mantenga una única copia del buffer para no ocupar la memoria innecesariamente.
+
+Como las direcciones que utilizamos viven por fuera de los 817MB definidos en los segmentos, asumimos que los segmentos de codigo y datos de nivel 0 y 3 ocupan toda la memoria (4 GB)
 
 ![Flujo del sistema](./img/esquema_cartucho.png)
 
