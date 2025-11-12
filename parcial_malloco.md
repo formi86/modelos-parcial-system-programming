@@ -84,3 +84,151 @@ Considerando:
 - Si se pasa un puntero que pertenece a un bloque reservado pero no es la dirección más baja, el comportamiento de la syscall `chau` es indefinido.
 - Si la tarea continúa usando la memoria una vez liberada, el comportamiento del sistema es indefinido.
 - No nos preocuparemos por reciclar la memoria liberada, bastará con liberarla
+
+
+
+### Resolucion:
+
+#### Ejercicio 1:
+
+##### Pedir Memoria:
+- Implementar syscall para pedir memoria.
+  - La syscall debe llamar a una interrupcion.
+    ``` C
+    LS_INLINE void syscall_malloc(size_t size) {
+    __asm__ volatile("int $90" /* int. de soft. 90 */
+                     :
+                     : "a"(size),
+                     : "memory",
+                      "cc"); /* announce to the compiler that the memory and
+                                condition codes have been modified */
+    }
+    ```
+  - La interrupcion debe llamar a un handler. 
+    ``` asm
+    global _isr90
+    _isr90:
+      pushad
+
+      push eax              ; el size es pasado por parametro por pila segun convencion
+      call malloc_handler
+      add esp, 4
+
+      popad
+      iret
+    ```
+    > Tambien debemos agregar `IDT_ENTRY3(90)` en idt.c asi la interrupcion es mapeada en la idt.
+
+    - El handler debe llamar a `malloco()` y agregar la direccion devuelta al array de reservas de la tarea usando `dameReservas()`.
+      ``` C
+      void malloc_handler(size_t size) {
+        //TO-DO: Obtener task_id
+        void* virt = malloco(size);
+        if (virt == NULL) return;     // si malloco me devuelve NULL, no hay mas memoria disponible
+        reservas_por_tarea* reservas = dameReservas(task_id);
+
+        reserva_t* reserva = reservas->array_reservas[reservas->reservas_size];
+        reserva->virt = (vaddr_t)virt;
+        reserva->tamanio = size;
+        reserva->estado = 0;
+
+        reservas->reservas_size++;
+      }
+      ```
+
+- Cuando la tarea intente acceder debera hacerlo buscando la direccion en `dameReservas()`. 
+
+- Luego, el page fault se encargara de mapear la pagina con la direccion virtual dada. En el pagefault tambien deberemos marcar la reserva en el array como activa.
+  ``` C
+  bool page_fault_handler(vaddr_t virt) {
+    //TO-DO: Obtener task_id
+    reservas_por_tarea* reservas = dameReservas(task_id);
+
+    reserva_t* reserva = obtenerReservaPorVaddr(reservas, virt); // devuelve la reserva si se encuentra, null si no
+
+    // Chequeemos si el acceso fue correcto
+    if(reserva != NULL) {
+      paddr_t phy = mmu_next_free_user_page();
+      zero_page(phy);
+      mmu_map_page(rcr3(), virt, phy, MMU_P| MMU_U | MMU_W);
+      reserva->estado = 1;
+
+      return true;
+    } else {
+      desalojar_tarea(task_id);
+      liberar_reservas(reservas);
+
+      return false;
+    }
+  }
+  ```
+
+
+##### Liberar Memoria
+- Implementar syscall para liberar memoria.
+  - La syscall debe llamar a una interrupcion.
+    ``` C
+    LS_INLINE void syscall_free(uint32_t task_id, vaddr_t dir) {
+    __asm__ volatile("int $91" /* int. de soft. 91 */
+                     :
+                     : "a"(dir)
+                     : "memory",
+                      "cc"); /* announce to the compiler that the memory and
+                                condition codes have been modified */
+    }
+    ```
+  - La interrupcion debe llamar a un handler.
+    ``` asm
+    global _isr91
+    _isr91:
+      pushad
+
+      push eax              ; dir es pasado por parametro por pila segun convencion
+      call free_handler
+      add esp, 4
+
+      popad
+      iret
+    ```
+    > Tambien debemos agregar `IDT_ENTRY3(91)` en idt.c asi la interrupcion es mapeada en la idt.
+
+
+    - El handler debe primero verificar que la direccion sea una direccion asignada por malloco, en caso de ser asi debera llamar a `chau()` con la direccion virtual pasada por parametro.
+      ``` C
+      void free_handler(vaddr_t dir) {
+        if (esMemoriaReservada(dir)) {
+          chau(dir);
+        }
+      }
+      ```
+
+- El garbage collector se encargara mas adelante de liberar la direccion marcada para liberar con `chau()`.
+
+
+#### Ejercicio 2:
+
+- Agregar al sched la tarea garbageCollector que se ejecute cada 100 ticks de reloj
+
+- El garbage collector debera recorrer las reservas de cada una de las tareas en busca de reservas con estado para liberar.
+
+  ``` C
+  void garbageCollector(void) {
+    while (true) {
+      for (int id = 0; id < MAX_TASKS; id++) {
+        reservas_por_tarea* reservas = dameReservas(id);
+
+        for (int j = 0; j < reservas->reservas_size; j++) {
+          reserva_t* reserva = reservas->array_reservas[j];
+          tss_t* tss_target = &tss_tasks[id];
+          uint32_t cr3 = tss_target->cr3;
+
+          if (reserva->estado == 2) { 
+            mmu_unmap_page(cr3, reserva->virt);
+            reserva->estado = 3;
+          } 
+        }
+      }
+    }
+  }
+
+  ```
