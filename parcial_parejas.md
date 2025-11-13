@@ -309,19 +309,42 @@ Para poder implementar `conformar_pareja(task_id tarea)` y `romper_pareja()` deb
         for (uint32_t offset = 0; offset < 4 * 1024 * 1024; offset += PAGE_SIZE)
             mmu_unmap_page(cr3, 0xC0C00000 + offset);
 
-        actual->shared_active = false;
-        actual->shared_phys_base = 0;
+        task_actual->shared_active = false;
+        task_actual->shared_phys_base = 0;
 
         if (task_actual->lider) {
             task_actual->state = TASK_BLOCKED;
-
         } else {
-            if (pareja->state == TASK_BLOCKED) {
+            if (task_pareja->state == TASK_BLOCKED) {
                 mmu_free_region_4mb(base);
-                pareja->shared_active = false;
-                pareja->shared_phys_base = 0;
-                pareja->state = TASK_RUNNABLE;
+                task_pareja->shared_active = false;
+                task_pareja->shared_phys_base = 0;
+                task_pareja->state = TASK_RUNNABLE;
             }
         }
     }
+    ```
+
+- En el page fault handler agregamos lo siguiente
+    ``` C
+    ...
+    if (addr >= 0xC0C00000 && addr < 0xC1000000) {
+        sched_entry_t* actual = &sched_tasks[current_task];
+        if (!actual->shared_active) return;
+
+        uint32_t offset = addr - 0xC0C00000;
+        uint32_t phys = mmu_next_free_user_page();
+
+        // Limpio la página (usa una virtual temporal o zero_page)
+        zero_page(addr);
+
+        uint32_t base = actual->shared_phys_base;
+        uint32_t pareja_id = actual->pareja_id;
+        sched_entry_t* pareja = &sched_tasks[pareja_id];
+
+        // Mapear en ambos CR3
+        mmu_map_page(cr3_de(current_task), addr, base + offset, 1, actual->lider);
+        mmu_map_page(cr3_de(pareja_id), addr, base + offset, 1, 0);
+    }
+    ...
     ```
