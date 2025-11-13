@@ -91,3 +91,237 @@ Tengan en consideración los siguientes puntos:
 - Es necesario explicitar todas las asunciones que hagan sobre el sistema.
 - Es necesaria la entrega de **código que implemente las soluciones**.
 - `zero_page()` modifica páginas basándose en una **dirección virtual** (no física!)
+
+
+### Resolucion:
+
+#### Parte 1.1:
+
+##### `crear_pareja()`
+
+- Primero debemos hacer la funcion de la syscall que llame a una interrupcion
+    ``` C
+    LS_INLINE void crear_pareja(void) {
+    __asm__ volatile("int $90" /* int. de soft. 91 */
+                     :
+                     : "memory",
+                      "cc"); /* announce to the compiler that the memory and
+                                condition codes have been modified */
+    }
+    ```
+
+- Luego la interrupcion debe llamar a un handler
+    ``` asm
+    global _isr90
+    _isr90:
+      pushad
+
+      call crear_pareja_handle
+
+      popad
+      iret
+    ```
+
+- En el handler debemos primero ver si la tarea pertenece ya a una pareja, si no debemos pausar la tarea actual e informar al sistema que esta buscando pareja
+    ``` C
+    void crear_pareja_handle(void) {
+        int8_t task_id = current_task;
+        kassert(task_id <= 3, "task_id fuera del rango valido!");
+
+        if (pareja_de_actual(task_id) == 0) return;
+
+        sched_disable_task(task_id);
+
+        conformar_pareja(0);
+    }
+    ```
+
+
+##### `juntarse_con()`
+
+- Primero debemos hacer la funcion de la syscall que llame a una interrupcion
+    ``` C
+    LS_INLINE int juntarse_con(int pareja_id) {
+    __asm__ volatile("int $91" /* int. de soft. 91 */
+                     :
+                     : "a"(pareja_id)
+                     : "memory",
+                      "cc"); /* announce to the compiler that the memory and
+                                condition codes have been modified */
+    }
+    ```
+
+- Luego la interrupcion debe llamar a un handler
+    ``` asm
+    global _isr91
+    _isr91:
+      pushad
+
+      push eax
+      call juntarse_handle
+      add esp, 4
+
+      mov DWORD [esp + 28], eax ; Para poder devolver el valor de eax, lo modifico en la pila
+
+      popad
+      iret
+    ```
+
+- En el handler debemos primero ver si la tarea pertenece ya a una pareja, si no debemos verificar que la tarea pasada por parametro esten buscando pareja, en ese caso emparejamos y despausamos la tarea pareja
+    ``` C
+    int juntarse_handle(int pareja_id) {
+        task_id_t task_id = current_task;
+        kassert(task_id <= 3, "task_id fuera del rango valido!");
+
+        if (pareja_de_actual(task_id) == 0) return 1;
+
+        if (!aceptando_pareja(pareja_id)) return 1;
+
+        conformar_pareja(pareja_id);
+
+        return 0;
+    }
+    ```
+
+##### `abandonar_pareja()`
+
+- Primero debemos hacer la funcion de la syscall que llame a una interrupcion
+    ``` C
+    LS_INLINE void abandonar_pareja(void) {
+    __asm__ volatile("int $92" /* int. de soft. 92 */
+                     :
+                     : "memory",
+                      "cc"); /* announce to the compiler that the memory and
+                                condition codes have been modified */
+    }
+    ```
+
+- Luego la interrupcion debe llamar a un handler
+    ``` asm
+    global _isr92
+    _isr92:
+      pushad
+
+      call abandonar_pareja
+
+      popad
+      iret
+    ```
+
+- En el handler debemos primero ver si la tarea pertenece ya a una pareja, si no debemos verificar que la tarea pasada por parametro esten buscando pareja, en ese caso emparejamos y despausamos la tarea pareja
+    ``` C
+    void abandonar_pareja(void) {
+        task_id_t task_id = current_task;
+        kassert(task_id <= 3, "task_id fuera del rango valido!");
+
+        uint32_t pareja_id = pareja_de_actual(task_id);
+
+        if (pareja_id == 0) return;
+
+        romper_pareja();
+    }
+    ```
+
+- Para que las interrupciones se puedan llamar debemos agregar las entradas de nivel 3 a la IDT, usamos `IDT_ENTRY3()` para que las tareas de nivel de usuario puedan llamar la interrupcion.
+    ``` C
+    ...
+    IDT_ENTRY3(90);
+    IDT_ENTRY3(91);
+    IDT_ENTRY3(92);
+    ...
+    ```
+
+
+#### Parte 1.2:
+
+Para poder implementar `conformar_pareja(task_id tarea)` y `romper_pareja()` debemos hacer unas modificaciones en el kernel actual.
+
+- Primero vamos a cambiar el enum de estados de una tarea
+    ``` C
+    typedef enum {
+        TASK_SLOT_FREE,
+        TASK_RUNNABLE,
+        TASK_PAUSED,
+
+        TASK_BLOCKED,
+        TASK_LONELY,
+        TASK_MATCHED
+    } task_state_t;
+
+    typedef struct {
+        int16_t selector;
+        task_state_t state;
+
+        bool lider;
+        uint32_t pareja_id;
+        paddr_t* shared_phys_base;
+        bool shared_active;
+    } sched_entry_t;
+
+    ```
+
+- Ahora podemos hacer las funciones:
+
+    ``` C
+    void conformar_pareja(task_id_t pareja_id) {
+        task_id_t task_id = current_task;
+        sched_entry_t* task_actual = &sched_tasks[task_id];
+        
+        if (pareja_id == 0) {
+            task_actual->state = TASK_LONELY;
+            task_actual->lider = true;
+
+        } else {
+            sched_entry_t* task_pareja = &sched_tasks[pareja_id];
+
+            task_pareja->pareja_id = task_id;
+            task_actual->pareja_id = pareja_id;
+
+            task_pareja->state = TASK_MATCHED;
+            task_actual->state = TASK_MATCHED;
+
+            paddr_t base_fisica = mmu_alloc_region_4mb(); // tu función o equivalente
+            task_pareja->shared_phys_base = base_fisica;
+            task_pareja->shared_active = true;
+
+            task_actual->shared_phys_base = base_fisica;
+            task_actual->shared_active = true;
+
+            // Mapear en ambos CR3
+            for (uint32_t offset = 0; offset < 4 * 1024 * 1024; offset += PAGE_SIZE) {
+                mmu_map_page(cr3_de(pareja_id), 0xC0C00000 + offset, base_fisica + offset, 1, 0); // solo lectura
+                mmu_map_page(cr3_de(task_id),   0xC0C00000 + offset, base_fisica + offset, 1, 1); // lectura/escritura
+            }
+
+            // Reanudar a la líder, que estaba pausada
+            sched_enable_task(pareja_id);
+        }
+    }
+
+    void romper_pareja(void) {
+        task_id_t task_id = current_task;
+        sched_entry_t* task_actual = &sched_tasks[task_id];
+        sched_entry_t* task_pareja = &sched_tasks[task_actual->pareja_id];
+        
+        uint32_t base = actual->shared_phys_base;
+        uint32_t cr3 = rcr3();
+
+        for (uint32_t offset = 0; offset < 4 * 1024 * 1024; offset += PAGE_SIZE)
+            mmu_unmap_page(cr3, 0xC0C00000 + offset);
+
+        actual->shared_active = false;
+        actual->shared_phys_base = 0;
+
+        if (task_actual->lider) {
+            task_actual->state = TASK_BLOCKED;
+
+        } else {
+            if (pareja->state == TASK_BLOCKED) {
+                mmu_free_region_4mb(base);
+                pareja->shared_active = false;
+                pareja->shared_phys_base = 0;
+                pareja->state = TASK_RUNNABLE;
+            }
+        }
+    }
+    ```
